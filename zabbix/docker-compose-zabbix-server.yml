@@ -1,0 +1,152 @@
+version: '3'
+services:
+
+    zabbix-db: #Контейнер с postgreSQL
+      image: postgres:13 # Образ, который мы будем использовать
+      container_name: zabbix-db # Имя, которым будет называться наш контейнер
+      # Порты, которые мы пробрасываем с нашего докер сервера внутрь контейнера
+      # ports: # Актуально, только если нужно дебажить нашу бд снаружи докер сети
+      #   - 5432:5432
+      expose:
+        - 5432
+      volumes: # Папка, которую мы пробросим с докер сервера внутрь контейнера
+        - ./pg_data:/var/lib/postgresql/data/pgdata
+      environment: # Переменные среды
+        POSTGRES_PASSWORD: /run/secrets/db-pass # Задаём пароль от пользователя postgres
+        #POSTGRES_DB: zabbix # БД которая сразу же будет создана
+        #POSTGRES_DB: zabbixdb # БД которая сразу же будет создана
+        PGDATA: /var/lib/postgresql/data/pgdata # Путь внутри контейнера, где будет папка pgdata
+      networks:
+        - zabbix
+      restart: always
+      healthcheck:
+       test: ["CMD-SHELL", "pg_isready"]
+       interval: 10s
+       timeout: 5s
+       retries: 5
+      secrets:
+        - db-pass
+
+    zabbix-server: #Контейнер Zabbix
+      #image: zabbix/zabbix-server-pgsql:alpine-6.0-latest
+      image: zabbix/zabbix-server-pgsql:ubuntu-6.0-latest
+      container_name: zabbix-server
+      environment:
+        # POSTGRES_DB: zabbixdb # DB_SERVER_DBNAME не работает, смотрим /usr/bin/docker-entrypoint.sh
+        DB_SERVER_HOST: zabbix-db
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: Admin
+        ZBX_HISTORYSTORAGETYPES: log,text #Zabbix configuration variables
+        ZBX_DEBUGLEVEL: 1
+        ZBX_HOUSEKEEPINGFREQUENCY: 1
+        ZBX_MAXHOUSEKEEPERDELETE: 5000
+        ZBX_PROXYCONFIGFREQUENCY: 60
+      ports:
+        - "10051:10051"
+#      volumes:
+#        - ./zabbix-server/snmptraps:/var/lib/zabbix/snmptraps:ro
+#        - ./zabbix-server/modules:/var/lib/zabbix/modules:ro
+#        - ./zabbix-server/enc:/var/lib/zabbix/enc:ro #Том используется для хранения файлов связанных с TLS функционалом. Эти имена файлов указываются при помощи переменных окружения ZBX_TLSCAFILE, ZBX_TLSCRLFILE, ZBX_TLSKEY_FILE и ZBX_TLSPSKFILE
+#        - ./zabbix-server/ssh_keys:/var/lib/zabbix/ssh_keys:ro
+      networks:
+        - zabbix
+      restart: always
+
+    zabbix-agent: #контейнер с агентом для Zabbix-server
+      container_name: zabbix-agent
+      image: zabbix/zabbix-agent:alpine-6.0-latest
+      # ports:
+      #   - "10050:10050"
+      expose:
+        - 10500
+#      volumes:
+#        - ./zabbix-agent/proc:/proc
+#        - ./zabbix-agent/sys:/sys
+#        - ./zabbix-agent/dev:/dev
+#        - ./zabbix-agent/var/run/docker.sock:/var/run/docker.sock
+      privileged: true
+      pid: "host"
+      depends_on:
+        - zabbix-server
+      environment:
+        - ZBX_SERVER_HOST=zabbix-server
+      networks:
+        - zabbix
+      restart: always
+
+    zabbix-snmptraps: #контейнер c snmp traps
+      container_name: zabbix-snmptraps
+      image: zabbix/zabbix-snmptraps:alpine-6.0-latest
+      ports:
+        - "162:1162/udp"
+#      volumes:
+#        - ./zabbix-snmptraps:/var/lib/zabbix/snmptraps:rw
+      restart: always
+      depends_on:
+        - zabbix-server
+      environment:
+        - ZBX_SERVER_HOST=zabbix-server
+      networks:
+        - zabbix
+
+    zabbix-frontend: #вебморда
+      container_name: zabbix-frontend
+      #image: zabbix/zabbix-web-nginx-pgsql:alpine-6.0-latest
+      image: zabbix/zabbix-web-nginx-pgsql:ubuntu-6.0-latest
+      ports:
+        - "10081:8080"
+        - "10443:8443"
+      volumes:
+        - ./ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+        # - ./zabbix-web/ssl/nginx:/etc/ssl/nginx:ro
+        # - ./zabbix-web/share/zabbix/modules/:/usr/share/zabbix/modules/:ro
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+        interval: 10s
+        timeout: 5s
+        retries: 3
+        start_period: 30s
+      sysctls:
+        - net.core.somaxconn=65535
+      restart: always
+      depends_on:
+        - zabbix-server
+      environment:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: Admin
+        DB_SERVER_HOST: zabbix-db
+        # POSTGRES_DB: zabbixdb # DB_SERVER_DBNAME не работает, смотрим /usr/bin/docker-entrypoint.sh
+        ZBX_SERVER_HOST: zabbix-server
+        ZBX_POSTMAXSIZE: 64M
+        PHP_TZ: Europe/Moscow
+        ZBX_MAXEXECUTIONTIME: 500
+      networks:
+        - zabbix
+
+networks:
+  zabbix:
+    driver: bridge
+
+secrets:
+  db-pass:
+    file: ./db-pass
+
+    # ipam:
+    #   config:
+    #   - subnet: 172.16.0.0/24
+
+
+#pgadmin: #Контейнер с PGadmin
+#      image: dpage/pgadmin4
+#      links:
+#        - zabbix-db
+#      container_name: zabbix-pgadmin
+#      environment:
+#        PGADMIN_DEFAULT_EMAIL: sergey.kopilov@mundfish.com
+#        PGADMIN_DEFAULT_PASSWORD: Admin
+#      ports:
+#        - "61231:80" #проброс порта 61321 на 80 порт контейнера
+#      networks:
+#        zabbix:
+#          ipv4_address: 172.16.0.12
+#      restart: always
