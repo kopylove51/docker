@@ -1,0 +1,12 @@
+services:
+  mgs-dns-updater:
+    build: .
+    container_name: mgs-dns-updater
+    environment:
+      - CF_API_TOKEN=
+      - CF_ZONE_ID=
+      - CF_DNS_NAME=
+      - CF_TTL=
+    volumes:
+      - ./logs:/app/logs
+    restart: always
